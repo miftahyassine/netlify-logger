@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Logging…</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body>
+  <p>Loading…</p>
+
+  <script>
+    // call our function AND redirect afterward
+    fetch("/.netlify/functions/log", { method: "POST" })
+      .catch(()=>{})
+      .finally(()=>{
+        // set your redirect link here
+        window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/";
+      });
+  </script>
+</body>
+</html>
